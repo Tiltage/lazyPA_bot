@@ -1,7 +1,8 @@
 import datetime
 import logging
 import anthropic
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 from config import (
     ANTHROPIC_KEY, GEMINI_KEY,
@@ -11,9 +12,8 @@ from config import (
     CALENDAR_DEFAULT_DAYS_AHEAD,
     LOG_LEVEL,
 )
-from tools import list_emails, get_email, send_email, list_events, create_event
+from tools import list_emails, get_email, send_email, list_events, create_event, delete_event, update_event
 
-genai.configure(api_key=GEMINI_KEY)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(getattr(logging, LOG_LEVEL.upper(), logging.DEBUG))
@@ -35,8 +35,9 @@ def build_system_prompt() -> str:
     2. Comprehensiveness: Ensure you answer every part of the user's query.
     3. Formatting: Format all responses using Telegram HTML tags: <b>bold</b>, <i>italic</i>, <code>inline code</code>. Use plain bullet lines (• item) for lists. Never use markdown asterisks, underscores, or backtick syntax.
     4. Email Actions: Always confirm before sending emails — describe exactly what you will send and ask 'Should I send this?' unless the user explicitly said to go ahead.
-    5. Calendar Actions: For creating calendar events, infer the timezone as {TIMEZONE_NAME} unless told otherwise.
+    5. Calendar Actions: For creating, deleting, or editing calendar events, infer the timezone as {TIMEZONE_NAME} unless told otherwise. Always confirm destructive actions (delete/update) before proceeding — describe the event and the change, then ask 'Should I go ahead?' unless the user explicitly said to go ahead. To find an event's ID for deletion or editing, call list_events first — always pass days_ahead={CALENDAR_DEFAULT_DAYS_AHEAD} unless the user explicitly requests a different range. When creating an event, if the user's request implies recurrence (e.g. 'every Monday', 'weekly standup', 'daily reminder'), confirm the recurrence pattern with them before creating, then pass the appropriate RRULE string. For deleting recurring events (marked with '(recurring)'), you MUST ask the user: 'This is a recurring event — do you want to delete just this occurrence, or the entire series?' Then call delete_event with scope='single' or scope='series' based on their answer.
     6. Email Summaries: When asked to summarise email content, you MUST call get_email for each relevant email to retrieve the full body before summarising. Never summarise based on the snippet alone.
+    7. Tool Boundaries: NEVER use Gmail tools (list_emails, get_email) to search for calendar events. Calendar events can only be found via list_events. If list_events does not return the expected event, try a larger days_ahead value before giving up.
     
     """
     
@@ -86,22 +87,72 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "days_ahead": {"type": "integer", "description": "How many days ahead to look (default 7)", "default": CALENDAR_DEFAULT_DAYS_AHEAD}
+                "days_ahead": {"type": "integer", "description": f"How many days ahead to look (default {CALENDAR_DEFAULT_DAYS_AHEAD}). Always use {CALENDAR_DEFAULT_DAYS_AHEAD} unless the user explicitly requests a different range.", "default": CALENDAR_DEFAULT_DAYS_AHEAD}
             }
         }
     },
     {
         "name": "create_event",
-        "description": "Create a new Google Calendar event.",
+        "description": (
+            "Create a new Google Calendar event — either a single occurrence or a recurring series. "
+            "For recurring events, ask the user for the recurrence pattern (e.g. every Monday, daily, monthly) "
+            "and construct the appropriate RRULE string."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "summary": {"type": "string", "description": "Event title"},
                 "start_datetime": {"type": "string", "description": "Start time in ISO 8601 format with timezone, e.g. 2026-03-20T14:00:00+08:00"},
                 "end_datetime": {"type": "string", "description": "End time in ISO 8601 format with timezone"},
-                "description": {"type": "string", "description": "Optional event description", "default": ""}
+                "description": {"type": "string", "description": "Optional event description", "default": ""},
+                "recurrence": {
+                    "type": "string",
+                    "description": (
+                        "RRULE string for recurring events. Leave empty for a single event. "
+                        "Examples: 'RRULE:FREQ=DAILY', 'RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR', "
+                        "'RRULE:FREQ=MONTHLY;BYMONTHDAY=1', 'RRULE:FREQ=WEEKLY;BYDAY=TU;UNTIL=20261231T000000Z'."
+                    ),
+                    "default": ""
+                }
             },
             "required": ["summary", "start_datetime", "end_datetime"]
+        }
+    },
+    {
+        "name": "delete_event",
+        "description": (
+            "Delete a Google Calendar event by its event ID. Call list_events first to find the correct event ID. "
+            "If the event is recurring (marked with '(recurring)' in list_events output), you MUST ask the user "
+            "whether to delete just this single occurrence or the entire series before calling this tool, "
+            "then pass scope='single' or scope='series' accordingly."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "event_id": {"type": "string", "description": "The Google Calendar event ID to delete"},
+                "scope": {
+                    "type": "string",
+                    "enum": ["single", "series"],
+                    "description": "For recurring events: 'single' deletes only this occurrence, 'series' deletes all occurrences. For non-recurring events use 'single'.",
+                    "default": "single"
+                }
+            },
+            "required": ["event_id", "scope"]
+        }
+    },
+    {
+        "name": "update_event",
+        "description": "Update one or more fields of an existing Google Calendar event. Call list_events first to find the correct event ID. Only provided fields are changed.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "event_id": {"type": "string", "description": "The Google Calendar event ID to update"},
+                "summary": {"type": "string", "description": "New event title"},
+                "start_datetime": {"type": "string", "description": "New start time in ISO 8601 format with timezone"},
+                "end_datetime": {"type": "string", "description": "New end time in ISO 8601 format with timezone"},
+                "description": {"type": "string", "description": "New event description"}
+            },
+            "required": ["event_id"]
         }
     },
 ]
@@ -114,6 +165,8 @@ _TOOL_MAP = {
     "send_email":   send_email,
     "list_events":  list_events,
     "create_event": create_event,
+    "delete_event": delete_event,
+    "update_event": update_event,
 }
 
 def run_tool(tool_name: str, tool_input: dict) -> str:
@@ -218,18 +271,14 @@ def summarise_history(history: list[dict]) -> str:
 # ── Gemini Agent ──────────────────────────────────────────────────────────────
 
 def ask_gemini(user_message: str, history: list[dict] | None = None) -> str:
-    gemini_tools = [list_emails, get_email, send_email, list_events, create_event]
-    model = genai.GenerativeModel(
-        model_name=GEMINI_MODEL,
-        tools=gemini_tools,
-        system_instruction=build_system_prompt(),
-    )
+    gemini_tools = [list_emails, get_email, send_email, list_events, create_event, delete_event, update_event]
+    client = genai.Client(api_key=GEMINI_KEY)
     # Gemini uses "model" for assistant role; convert our shared history format
     gemini_history = [
-        {
-            "role": "model" if turn["role"] == "assistant" else "user",
-            "parts": [turn["content"]],
-        }
+        types.Content(
+            role="model" if turn["role"] == "assistant" else "user",
+            parts=[types.Part(text=turn["content"])],
+        )
         for turn in (history or [])
     ]
 
@@ -238,12 +287,20 @@ def ask_gemini(user_message: str, history: list[dict] | None = None) -> str:
         len(history or []),
         repr(user_message)[:200],
         "\n".join(
-            f"  [{i}] {m['role']}: {repr(m['parts'])[:200]}{'...' if len(repr(m['parts'])) > 200 else ''}"
+            f"  [{i}] {m.role}: {repr(m.parts)[:200]}{'...' if len(repr(m.parts)) > 200 else ''}"
             for i, m in enumerate(gemini_history)
         ),
     )
 
-    chat = model.start_chat(history=gemini_history, enable_automatic_function_calling=True)
+    chat = client.chats.create(
+        model=GEMINI_MODEL,
+        config=types.GenerateContentConfig(
+            system_instruction=build_system_prompt(),
+            tools=gemini_tools,
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=False),
+        ),
+        history=gemini_history,
+    )
     try:
         response = chat.send_message(user_message)
         logger.debug(

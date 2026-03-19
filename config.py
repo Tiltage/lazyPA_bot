@@ -28,7 +28,7 @@ GMAIL_DEFAULT_MAX_RESULTS = _cfg.getint("gmail", "default_max_results", fallback
 GMAIL_MAX_BODY_LENGTH     = _cfg.getint("gmail", "max_body_length", fallback=3000)
 GMAIL_SNIPPET_LENGTH      = _cfg.getint("gmail", "snippet_length", fallback=120)
 
-CALENDAR_DEFAULT_DAYS_AHEAD = _cfg.getint("calendar", "default_days_ahead", fallback=7)
+CALENDAR_DEFAULT_DAYS_AHEAD = _cfg.getint("calendar", "default_days_ahead", fallback=180)
 CALENDAR_MAX_EVENTS         = _cfg.getint("calendar", "max_events", fallback=15)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
