@@ -92,6 +92,9 @@ def create_event(
     Leave empty (default) for a single one-off event.
     """
     service = get_service("calendar", "v3")
+    # Normalise recurrence: the Calendar API requires the "RRULE:" prefix.
+    if recurrence and not recurrence.upper().startswith("RRULE:"):
+        recurrence = f"RRULE:{recurrence}"
     event = {
         "summary": summary,
         "description": description,
@@ -100,10 +103,15 @@ def create_event(
     }
     if recurrence:
         event["recurrence"] = [recurrence]
-    created = service.events().insert(calendarId="primary", body=event).execute()
+    logger.debug("[TOOL create_event] summary=%r start=%r end=%r recurrence=%r body=%r",
+                 summary, start_datetime, end_datetime, recurrence, event)
+    try:
+        created = service.events().insert(calendarId="primary", body=event).execute()
+    except Exception as e:
+        logger.debug("[TOOL create_event] API error: %s", e)
+        return f"Failed to create event: {e}"
     result = f"Event '{summary}' created{' (recurring)' if recurrence else ''}. Link: {created.get('htmlLink')}"
-    logger.debug("[TOOL create_event] summary=%r start=%r end=%r recurrence=%r => %s",
-                 summary, start_datetime, end_datetime, recurrence, result)
+    logger.debug("[TOOL create_event] => %s", result)
     return result
 
 
@@ -120,7 +128,11 @@ def delete_event(event_id: str, scope: str = "single") -> str:
         target_id = event_id.split("_")[0] if "_" in event_id else event_id
     else:
         target_id = event_id
-    service.events().delete(calendarId="primary", eventId=target_id).execute()
+    try:
+        service.events().delete(calendarId="primary", eventId=target_id).execute()
+    except Exception as e:
+        logger.debug("[TOOL delete_event] API error: %s", e)
+        return f"Failed to delete event: {e}"
     result = f"Event '{target_id}' deleted successfully (scope={scope})."
     logger.debug("[TOOL delete_event] event_id=%r scope=%r target_id=%r => %s",
                  event_id, scope, target_id, result)
@@ -147,7 +159,11 @@ def update_event(
         patch["end"] = {"dateTime": end_datetime, "timeZone": TIMEZONE_NAME}
     if not patch:
         return "No fields provided to update."
-    updated = service.events().patch(calendarId="primary", eventId=event_id, body=patch).execute()
+    try:
+        updated = service.events().patch(calendarId="primary", eventId=event_id, body=patch).execute()
+    except Exception as e:
+        logger.debug("[TOOL update_event] API error: %s", e)
+        return f"Failed to update event: {e}"
     result = f"Event updated: '{updated.get('summary', event_id)}'. Link: {updated.get('htmlLink')}"
     logger.debug("[TOOL update_event] event_id=%r patch=%r => %s", event_id, patch, result)
     return result
