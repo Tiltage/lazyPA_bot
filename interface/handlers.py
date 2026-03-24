@@ -47,7 +47,7 @@ async def _call_agent(user_text: str, context: ContextTypes.DEFAULT_TYPE) -> str
     except Exception as e:
         return format_error(str(e))
     reply = sanitize_telegram_html(reply)
-    history.append({"role": "user",      "content": user_text})
+    history.append({"role": "user",     "content": user_text})
     history.append({"role": "assistant", "content": reply})
     if len(history) > MAX_HISTORY_TURNS * 2:
         history = history[-(MAX_HISTORY_TURNS * 2):]
