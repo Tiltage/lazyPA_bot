@@ -7,6 +7,9 @@ from config import TELEGRAM_TOKEN, LOG_LEVEL
 from interface.handlers import get_command_registry, handle_callback, handle_message
 
 logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.DEBUG))
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.INFO)
 
 
 async def _set_commands(app: Application) -> None:
