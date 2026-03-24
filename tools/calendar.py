@@ -1,7 +1,9 @@
 """Google Calendar tool classes."""
 
+import calendar as cal_mod
 import datetime
 import logging
+from zoneinfo import ZoneInfo
 
 from config import CALENDAR_DEFAULT_DAYS_AHEAD, CALENDAR_MAX_EVENTS, TIMEZONE_NAME
 from tools.base import Tool, registry
@@ -62,6 +64,125 @@ def _fetch_events(days_ahead: int) -> list[dict]:
 def get_events_raw(days_ahead: int = CALENDAR_DEFAULT_DAYS_AHEAD) -> list[dict]:
     """Return structured event dicts for UI rendering (not for the LLM)."""
     return _fetch_events(days_ahead)
+
+
+# ── Month-based fetching for calendar image view ────────────────────────────
+
+
+def _parse_date(iso_str: str) -> datetime.date:
+    """Extract a date from an ISO datetime or date string."""
+    if not iso_str:
+        return datetime.date.today()
+    if "T" in iso_str:
+        return datetime.datetime.fromisoformat(iso_str).date()
+    return datetime.date.fromisoformat(iso_str)
+
+
+def _end_date_inclusive(end_iso: str) -> datetime.date:
+    """Convert an end ISO string to an inclusive end date.
+
+    Google Calendar uses exclusive end dates for all-day events (date-only
+    strings) but inclusive for timed events (datetime strings).
+    """
+    if not end_iso:
+        return datetime.date.today()
+    if "T" in end_iso:
+        return datetime.datetime.fromisoformat(end_iso).date()
+    # All-day exclusive end → subtract one day
+    return datetime.date.fromisoformat(end_iso) - datetime.timedelta(days=1)
+
+
+def get_events_for_month(year: int, month: int) -> list[dict]:
+    """Fetch all calendar events occurring within a given month."""
+    service = get_service("calendar", "v3")
+    tz = ZoneInfo(TIMEZONE_NAME)
+
+    first = datetime.datetime(year, month, 1, tzinfo=tz)
+    if month == 12:
+        next_month = datetime.datetime(year + 1, 1, 1, tzinfo=tz)
+    else:
+        next_month = datetime.datetime(year, month + 1, 1, tzinfo=tz)
+
+    result = (
+        service.events()
+        .list(
+            calendarId="primary",
+            timeMin=first.isoformat(),
+            timeMax=next_month.isoformat(),
+            maxResults=200,
+            singleEvents=True,
+            orderBy="startTime",
+        )
+        .execute()
+    )
+
+    events: list[dict] = []
+    for e in result.get("items", []):
+        start_display, start_iso = _format_start(e.get("start", {}))
+        _, end_iso = _format_start(e.get("end", {}))
+        events.append(
+            {
+                "id": e.get("id", ""),
+                "summary": e.get("summary", "(no title)"),
+                "start_display": start_display,
+                "start_iso": start_iso,
+                "end_iso": end_iso,
+                "description": e.get("description", ""),
+                "is_recurring": "recurringEventId" in e,
+            }
+        )
+    return events
+
+
+def process_month_events(events: list[dict], year: int, month: int) -> dict:
+    """Post-process events into structures needed by the calendar renderer.
+
+    Returns dict with:
+        by_date:          {date: [event_dicts]}  — for day-detail lookups
+        day_markers:      {date: {"recurring": bool, "one_time": bool}}
+        multi_day:        [{"summary", "start_date", "end_date", "is_recurring"}]
+        days_with_events: set of day-of-month ints (for keyboard buttons)
+    """
+    by_date: dict[datetime.date, list[dict]] = {}
+    day_markers: dict[datetime.date, dict] = {}
+    multi_day: list[dict] = []
+
+    for ev in events:
+        start_date = _parse_date(ev["start_iso"])
+        end_date = _end_date_inclusive(ev["end_iso"])
+
+        if end_date > start_date:
+            multi_day.append(
+                {
+                    "summary": ev["summary"],
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "is_recurring": ev["is_recurring"],
+                }
+            )
+
+        # Register this event on every date it covers within the month
+        d = start_date
+        while d <= end_date:
+            if d.year == year and d.month == month:
+                by_date.setdefault(d, []).append(ev)
+                markers = day_markers.setdefault(
+                    d, {"recurring": False, "one_time": False}
+                )
+                if ev["is_recurring"]:
+                    markers["recurring"] = True
+                else:
+                    markers["one_time"] = True
+            d += datetime.timedelta(days=1)
+
+    days_with_events = {d.day for d in by_date}
+
+    return {
+        "by_date": by_date,
+        "day_markers": day_markers,
+        "multi_day": multi_day,
+        "days_with_events": days_with_events,
+    }
 
 
 # ── Tool classes ─────────────────────────────────────────────────────────────

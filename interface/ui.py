@@ -187,6 +187,85 @@ def format_event_cancel_confirm(event: dict) -> str:
     return f"⚠️ Cancel <b>{summary}</b> on {when}?"
 
 
+# ── Calendar month-view keyboards ────────────────────────────────────────────
+
+_MONTH_NAMES = [
+    "", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+]
+
+
+def build_calendar_keyboard(
+    year: int, month: int, days_with_events: set[int],
+) -> InlineKeyboardMarkup:
+    """Build the keyboard shown below the calendar image.
+
+    Layout:
+      [◀] [Month Year] [▶]
+      day buttons (only days with events, rows of 7)
+      [➕ Add Event]
+    """
+    # Navigation row
+    nav_row = [
+        InlineKeyboardButton("◀", callback_data="cal_prev"),
+        InlineKeyboardButton(
+            f"{_MONTH_NAMES[month]} {year}", callback_data="cal_noop"
+        ),
+        InlineKeyboardButton("▶", callback_data="cal_next"),
+    ]
+
+    # Day buttons — only for days that have events, grouped in rows of 7
+    sorted_days = sorted(days_with_events)
+    day_buttons = [
+        InlineKeyboardButton(str(d), callback_data=f"cal_day:{d}")
+        for d in sorted_days
+    ]
+    day_rows = [day_buttons[i : i + 7] for i in range(0, len(day_buttons), 7)]
+
+    # Add event row
+    add_row = [InlineKeyboardButton("➕ Add Event", callback_data="evt_add")]
+
+    return InlineKeyboardMarkup([nav_row] + day_rows + [add_row])
+
+
+def build_day_detail_keyboard(
+    day_events: list[dict],
+) -> InlineKeyboardMarkup:
+    """Numbered event buttons for a specific day + Back to calendar."""
+    number_buttons = [
+        InlineKeyboardButton(str(i), callback_data=f"evt_sel:{i - 1}")
+        for i in range(1, min(len(day_events), 10) + 1)
+    ]
+    rows = [number_buttons[i : i + 5] for i in range(0, len(number_buttons), 5)]
+    rows.append([InlineKeyboardButton("◀ Back to calendar", callback_data="cal_back")])
+    return InlineKeyboardMarkup(rows)
+
+
+def format_day_events_text(
+    events: list[dict], year: int, month: int, day: int,
+) -> str:
+    """Format a day's events as an HTML message."""
+    import datetime
+
+    d = datetime.date(year, month, day)
+    header = f"📅 <b>{d.strftime('%A, %b %d %Y')}</b>\n"
+
+    if not events:
+        return header + "\nNo events on this day."
+
+    lines: list[str] = []
+    for i, ev in enumerate(events, 1):
+        summary = html.escape(ev.get("summary", "(no title)"))
+        when = html.escape(ev.get("start_display", ""))
+        tag = " 🔵" if ev.get("is_recurring") else " 🟠"
+        lines.append(f"<b>{i}.</b> {summary}{tag}\n     🕐 {when}")
+        desc = ev.get("description", "").strip()
+        if desc:
+            lines.append(f"     📝 {html.escape(_trunc(desc, 80))}")
+
+    return header + "\n" + "\n".join(lines) + "\n\nTap a number to manage that event."
+
+
 # ── Email display ─────────────────────────────────────────────────────────────
 
 def format_emails_table(emails: list[dict]) -> str:

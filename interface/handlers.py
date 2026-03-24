@@ -1,6 +1,9 @@
 """Telegram command and callback handlers."""
+import datetime
 import logging
-from telegram import Update
+from zoneinfo import ZoneInfo
+
+from telegram import InputMediaPhoto, Update
 from telegram.ext import ContextTypes
 
 # ── Command registry ──────────────────────────────────────────────────────────
@@ -18,15 +21,20 @@ def command(name: str, description: str):
 
 def get_command_registry() -> list[tuple[str, str, object]]:
     return list(_registry)
-from config import ALLOWED_CHAT_ID
+
+
+from config import ALLOWED_CHAT_ID, TIMEZONE_NAME
 from agent import claude_agent, gemini_agent, summarise_history, MAX_HISTORY_TURNS
 from tools import get_events_raw, get_emails_raw
+from tools.calendar import get_events_for_month, process_month_events
+from interface.calendar_render import render_calendar_image
 from interface.ui import (
     format_model_switch, format_error,
     format_clear_confirm, format_compact_thinking, format_compact_done,
     format_events_table, build_events_keyboard,
     build_event_action_keyboard, build_event_cancel_confirm_keyboard,
     format_event_detail, format_event_cancel_confirm,
+    build_calendar_keyboard, build_day_detail_keyboard, format_day_events_text,
     format_emails_table, build_emails_keyboard,
     build_email_action_keyboard, format_email_detail,
     sanitize_telegram_html,
@@ -127,22 +135,43 @@ async def compact_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── Structured data display commands ─────────────────────────────────────────
 
-@command("events", "Show upcoming calendar events")
+async def _send_calendar(
+    chat_id: int,
+    year: int,
+    month: int,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    """Render and send (or edit) the calendar image. Returns the message id."""
+    today = datetime.datetime.now(ZoneInfo(TIMEZONE_NAME)).date()
+    events = get_events_for_month(year, month)
+    processed = process_month_events(events, year, month)
+
+    context.user_data["cal_month"] = (year, month)
+    context.user_data["cal_events"] = processed
+
+    image = render_calendar_image(year, month, processed, today)
+    keyboard = build_calendar_keyboard(year, month, processed["days_with_events"])
+
+    msg = await context.bot.send_photo(
+        chat_id=chat_id, photo=image, reply_markup=keyboard,
+    )
+    context.user_data["cal_msg_id"] = msg.message_id
+    return msg.message_id
+
+
+@command("events", "Show calendar overview")
 async def show_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Fetch and display calendar events with inline action keyboard. Usage: /events"""
+    """Show a month-view calendar image with navigation. Usage: /events"""
     if not _guard(update):
         return
+    today = datetime.datetime.now(ZoneInfo(TIMEZONE_NAME)).date()
     try:
-        events = get_events_raw()
+        await _send_calendar(
+            update.effective_chat.id, today.year, today.month, context,
+        )
     except Exception as e:
+        logger.exception("Failed to render calendar")
         await update.message.reply_text(format_error(str(e)), parse_mode="HTML")
-        return
-    context.user_data["last_events"] = events
-    await update.message.reply_text(
-        format_events_table(events),
-        parse_mode="HTML",
-        reply_markup=build_events_keyboard(events) if events else None,
-    )
 
 
 @command("emails", "Show recent emails")
@@ -172,8 +201,70 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     chat_id = query.message.chat_id
 
-    # ── Calendar callbacks ────────────────────────────────────────────────────
-    if data.startswith("evt_sel:"):
+    # ── Calendar month-view callbacks ────────────────────────────────────────
+    if data == "cal_noop":
+        return  # inert label button
+
+    elif data in ("cal_prev", "cal_next"):
+        year, month = context.user_data.get("cal_month", (datetime.date.today().year, datetime.date.today().month))
+        if data == "cal_prev":
+            month -= 1
+            if month < 1:
+                month, year = 12, year - 1
+        else:
+            month += 1
+            if month > 12:
+                month, year = 1, year + 1
+
+        today = datetime.datetime.now(ZoneInfo(TIMEZONE_NAME)).date()
+        events = get_events_for_month(year, month)
+        processed = process_month_events(events, year, month)
+        context.user_data["cal_month"] = (year, month)
+        context.user_data["cal_events"] = processed
+
+        image = render_calendar_image(year, month, processed, today)
+        keyboard = build_calendar_keyboard(year, month, processed["days_with_events"])
+        await query.edit_message_media(
+            media=InputMediaPhoto(media=image),
+            reply_markup=keyboard,
+        )
+
+    elif data.startswith("cal_day:"):
+        day = int(data.split(":")[1])
+        year, month = context.user_data.get("cal_month", (datetime.date.today().year, datetime.date.today().month))
+        processed = context.user_data.get("cal_events", {})
+        by_date = processed.get("by_date", {})
+        d = datetime.date(year, month, day)
+        day_events = by_date.get(d, [])
+
+        # Store for evt_sel / action handlers
+        context.user_data["last_events"] = day_events
+        context.user_data["cal_current_day"] = day
+
+        # Cannot edit photo→text, so delete photo and send new text message
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=format_day_events_text(day_events, year, month, day),
+            parse_mode="HTML",
+            reply_markup=build_day_detail_keyboard(day_events) if day_events else None,
+        )
+        context.user_data["cal_msg_id"] = msg.message_id
+
+    elif data == "cal_back":
+        # Return from day-detail view to the calendar image
+        year, month = context.user_data.get("cal_month", (datetime.date.today().year, datetime.date.today().month))
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await _send_calendar(chat_id, year, month, context)
+
+    # ── Event detail callbacks (day-view context) ────────────────────────────
+    elif data.startswith("evt_sel:"):
         idx = int(data.split(":")[1])
         events = context.user_data.get("last_events", [])
         if idx >= len(events):
@@ -187,12 +278,23 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "evt_back":
-        events = context.user_data.get("last_events", [])
-        await query.edit_message_text(
-            format_events_table(events),
-            parse_mode="HTML",
-            reply_markup=build_events_keyboard(events),
-        )
+        # Go back to day-detail view (not the old flat table)
+        year, month = context.user_data.get("cal_month", (datetime.date.today().year, datetime.date.today().month))
+        day = context.user_data.get("cal_current_day")
+        if day is not None:
+            day_events = context.user_data.get("last_events", [])
+            await query.edit_message_text(
+                format_day_events_text(day_events, year, month, day),
+                parse_mode="HTML",
+                reply_markup=build_day_detail_keyboard(day_events),
+            )
+        else:
+            # Fallback: go straight to calendar
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            await _send_calendar(chat_id, year, month, context)
 
     elif data.startswith("evt_edit:"):
         idx = int(data.split(":")[1])
@@ -245,12 +347,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=chat_id, text=reply, parse_mode="HTML")
 
     elif data == "evt_add":
-        await query.edit_message_reply_markup(reply_markup=None)
-        reply = await _call_agent(
-            "I want to add a new calendar event. Please ask me for the details.",
-            context,
+        # Prompt user for event details; next message gets routed to agent
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "📅 <b>New Event</b>\n"
+                "Describe your event and I'll create it for you.\n"
+                "<i>e.g. Team lunch tomorrow at noon for 1 hour</i>"
+            ),
+            parse_mode="HTML",
         )
-        await context.bot.send_message(chat_id=chat_id, text=reply, parse_mode="HTML")
+        context.user_data["evt_add_pending"] = True
 
     # ── Email callbacks ───────────────────────────────────────────────────────
     elif data.startswith("mail_sel:"):
@@ -312,5 +423,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.debug("Blocked: ID mismatch")
         return
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-    reply = await _call_agent(update.message.text, context)
+
+    user_text = update.message.text
+    # If the user just tapped "Add Event", prepend context for the agent
+    if context.user_data.pop("evt_add_pending", False):
+        user_text = f"Create an event for: {user_text}"
+
+    reply = await _call_agent(user_text, context)
     await update.message.reply_text(reply, parse_mode="HTML")
