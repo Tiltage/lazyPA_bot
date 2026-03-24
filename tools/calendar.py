@@ -69,11 +69,21 @@ def get_events_raw(days_ahead: int = CALENDAR_DEFAULT_DAYS_AHEAD) -> list[dict]:
 
 class ListEvents(Tool):
     name = "list_events"
-    description = "List upcoming Google Calendar events for a given number of days ahead. Returns event summaries, times, IDs, and whether each is recurring."
+    description = f"""\
+List upcoming Google Calendar events. Returns event summaries, times, \
+descriptions, IDs, and whether each is recurring. \
+IMPORTANT: You MUST always provide the days_ahead parameter — choose the \
+smallest reasonable value based on the user's request. Examples: 'tomorrow' → 2, \
+'this week' → 7, 'next Monday' → days until that Monday + 1, 'next month' → 31. \
+Only omit days_ahead for very broad queries (defaults to {CALENDAR_DEFAULT_DAYS_AHEAD})."""
     parameters = {
         "days_ahead": {
             "type": "integer",
-            "description": f"Number of days ahead to search (default {CALENDAR_DEFAULT_DAYS_AHEAD}).",
+            "description": f"""\
+Number of days ahead to search. MUST be provided — use the smallest \
+value that covers the user's request (e.g. 2 for 'tomorrow', 7 for \
+'this week'). Defaults to {CALENDAR_DEFAULT_DAYS_AHEAD} ONLY as a \
+last resort when no timeframe can be inferred.""",
         },
     }
 
@@ -84,6 +94,7 @@ class ListEvents(Tool):
         lines = [
             f"• {e['start_display']}: {e['summary']}"
             f"{' (recurring)' if e['is_recurring'] else ''}"
+            f"{' — ' + e['description'] if e['description'] else ''}"
             f" [id: {e['id']}]"
             for e in events
         ]
@@ -92,10 +103,9 @@ class ListEvents(Tool):
 
 class CreateEvent(Tool):
     name = "create_event"
-    description = (
-        "Create a Google Calendar event. For recurring events, provide an RRULE string "
-        "(e.g. 'RRULE:FREQ=WEEKLY;BYDAY=MO'). Omit recurrence for single events."
-    )
+    description = f"""\
+Create a Google Calendar event. For recurring events, provide an RRULE string \
+(e.g. 'RRULE:FREQ=WEEKLY;BYDAY=MO'). Omit recurrence for single events."""
     parameters = {
         "summary": {
             "type": "string",
@@ -152,10 +162,9 @@ class CreateEvent(Tool):
 
 class DeleteEvent(Tool):
     name = "delete_event"
-    description = (
-        "Delete a Google Calendar event. "
-        "Use scope='single' for one occurrence, scope='series' for the entire recurring series."
-    )
+    description = f"""\
+Delete a Google Calendar event. \
+Use scope='single' for one occurrence, scope='series' for the entire recurring series."""
     parameters = {
         "event_id": {
             "type": "string",
@@ -184,7 +193,10 @@ class DeleteEvent(Tool):
 
 class UpdateEvent(Tool):
     name = "update_event"
-    description = "Update fields of an existing Google Calendar event. Only provided fields are changed."
+    description = f"""\
+Update fields of an existing Google Calendar event. Only provided fields are changed. \
+Use scope='single' to update just this occurrence, scope='series' to update the entire \
+recurring series. For non-recurring events, scope is ignored."""
     parameters = {
         "event_id": {
             "type": "string",
@@ -206,6 +218,11 @@ class UpdateEvent(Tool):
             "type": "string",
             "description": "New event description.",
         },
+        "scope": {
+            "type": "string",
+            "description": "'single' to update one occurrence, 'series' to update the entire recurring series.",
+            "default": "single",
+        },
     }
     required = ["event_id"]
 
@@ -216,8 +233,16 @@ class UpdateEvent(Tool):
         start_datetime: str = None,
         end_datetime: str = None,
         description: str = None,
+        scope: str = "single",
     ) -> str:
         service = get_service("calendar", "v3")
+
+        # Resolve target: series base ID or single occurrence ID
+        if scope == "series":
+            target_id = event_id.split("_")[0] if "_" in event_id else event_id
+        else:
+            target_id = event_id
+
         patch = {}
         if summary is not None:
             patch["summary"] = summary
@@ -231,12 +256,12 @@ class UpdateEvent(Tool):
             return "No fields provided to update."
         try:
             updated = service.events().patch(
-                calendarId="primary", eventId=event_id, body=patch
+                calendarId="primary", eventId=target_id, body=patch
             ).execute()
         except Exception as e:
             return f"Failed to update event: {e}"
         return (
-            f"Event updated: '{updated.get('summary', event_id)}'. "
+            f"Event updated: '{updated.get('summary', target_id)}' (scope={scope}). "
             f"Link: {updated.get('htmlLink')}"
         )
 

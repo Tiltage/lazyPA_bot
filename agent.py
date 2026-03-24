@@ -217,6 +217,24 @@ class GeminiAgent(Agent):
                 repr(response.candidates)[:500],
                 response.usage_metadata,
             )
+
+            # Log tool calls that happened during automatic function calling
+            for turn in chat.get_history():
+                for part in (turn.parts or []):
+                    if part.function_call:
+                        fc = part.function_call
+                        logger.debug(
+                            "[GEMINI TOOL CALL] %s(%s)",
+                            fc.name, fc.args,
+                        )
+                    if part.function_response:
+                        fr = part.function_response
+                        result = fr.response.get("result", "") if isinstance(fr.response, dict) else str(fr.response)
+                        logger.debug(
+                            "[GEMINI TOOL RESULT] %s => %s",
+                            fr.name, repr(result)[:300],
+                        )
+
             return response.text
         except Exception as e:
             logger.debug("[GEMINI ERROR] %s", e)
@@ -229,11 +247,11 @@ claude_agent = ClaudeAgent()
 gemini_agent = GeminiAgent()
 
 
-# ── History Summariser (always uses Claude) ──────────────────────────────────
+# ── History Summariser (uses the active model) ───────────────────────────────
 
 
-def summarise_history(history: list[dict]) -> str:
-    """Summarise a conversation history into a compact paragraph using Claude."""
+def summarise_history(history: list[dict], agent: Agent) -> str:
+    """Summarise a conversation history using the currently active agent."""
     lines = []
     for turn in history:
         role = turn["role"].upper()
@@ -241,17 +259,9 @@ def summarise_history(history: list[dict]) -> str:
         if isinstance(content, str):
             lines.append(f"{role}: {content}")
     transcript = "\n".join(lines)
-    response = claude_agent._client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=1024,
-        messages=[{
-            "role": "user",
-            "content": (
-                "Summarise the following conversation concisely, preserving all "
-                "important context, decisions, pending items, and any data the "
-                "user may refer back to (e.g. event names, email subjects):\n\n"
-                + transcript
-            ),
-        }],
+    return agent.ask(
+        "Summarise the following conversation concisely, preserving all "
+        "important context, decisions, pending items, and any data the "
+        "user may refer back to (e.g. event names, email subjects):\n\n"
+        + transcript
     )
-    return response.content[0].text

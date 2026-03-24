@@ -108,7 +108,9 @@ async def compact_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     status = await update.message.reply_text(format_compact_thinking())
     try:
-        summary = summarise_history(history)
+        active_model = context.user_data.get("active_model", "gemini")
+        agent = claude_agent if active_model == "claude" else gemini_agent
+        summary = summarise_history(history, agent)
         original_turns = len(history)
         # Replace history with a single summary turn the model can reference
         context.user_data["conversation_history"] = [

@@ -81,10 +81,9 @@ def get_emails_raw(
 
 class ListEmails(Tool):
     name = "list_emails"
-    description = (
-        "List recent emails from Gmail. "
-        "Use the query parameter for filtering (e.g. 'from:boss@example.com', 'is:unread', 'subject:invoice')."
-    )
+    description = f"""\
+List recent emails from Gmail. \
+Use the query parameter for filtering (e.g. 'from:boss@example.com', 'is:unread', 'subject:invoice')."""
     parameters = {
         "max_results": {
             "type": "integer",
