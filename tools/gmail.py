@@ -1,13 +1,19 @@
-"""Gmail tool functions."""
+"""Gmail tool classes."""
+
 import base64
 import logging
 import re
 from email.mime.text import MIMEText
 from email.utils import parsedate_to_datetime
+
 from config import GMAIL_DEFAULT_MAX_RESULTS, GMAIL_MAX_BODY_LENGTH, GMAIL_SNIPPET_LENGTH
+from tools.base import Tool, registry
 from tools.utils import get_service
 
 logger = logging.getLogger(__name__)
+
+
+# ── Private helpers ──────────────────────────────────────────────────────────
 
 
 def _shorten_sender(from_str: str) -> str:
@@ -62,28 +68,6 @@ def _fetch_emails_raw(
     return emails
 
 
-def list_emails(max_results: int = GMAIL_DEFAULT_MAX_RESULTS, query: str = "") -> str:
-    """List recent emails from Gmail inbox. Use query for filtering (e.g. 'from:boss@example.com', 'is:unread', 'subject:invoice')."""
-    emails = _fetch_emails_raw(max_results, query)
-    if not emails:
-        result = "No emails found."
-        logger.debug("[TOOL list_emails] query=%r max_results=%d => %s", query, max_results, result)
-        return result
-    output = []
-    for e in emails:
-        output.append(
-            f"ID: {e['id']}\n"
-            f"From: {e['from']}\n"
-            f"Subject: {e['subject']}\n"
-            f"Date: {e['date']}\n"
-            f"Preview: {e['snippet']}"
-        )
-    result = "\n\n---\n\n".join(output)
-    logger.debug("[TOOL list_emails] query=%r max_results=%d => %d emails:\n%s",
-                 query, max_results, len(emails), result[:1000])
-    return result
-
-
 def get_emails_raw(
     max_results: int = GMAIL_DEFAULT_MAX_RESULTS,
     query: str = "",
@@ -92,42 +76,115 @@ def get_emails_raw(
     return _fetch_emails_raw(max_results, query)
 
 
-def get_email(message_id: str) -> str:
-    """Get the full content of a specific email by its message ID."""
-    service = get_service("gmail", "v1")
-    msg = service.users().messages().get(
-        userId="me", id=message_id, format="full"
-    ).execute()
-    headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
-    body = ""
-    parts = msg["payload"].get("parts", [])
-    if parts:
-        for part in parts:
-            if part["mimeType"] == "text/plain":
-                data = part["body"].get("data", "")
-                body = base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
-                break
-    else:
-        data = msg["payload"]["body"].get("data", "")
-        body = base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
-    result = (
-        f"From: {headers.get('From', '')}\n"
-        f"Subject: {headers.get('Subject', '')}\n"
-        f"Date: {headers.get('Date', '')}\n\n"
-        f"{body[:GMAIL_MAX_BODY_LENGTH]}"
+# ── Tool classes ─────────────────────────────────────────────────────────────
+
+
+class ListEmails(Tool):
+    name = "list_emails"
+    description = (
+        "List recent emails from Gmail. "
+        "Use the query parameter for filtering (e.g. 'from:boss@example.com', 'is:unread', 'subject:invoice')."
     )
-    logger.debug("[TOOL get_email] message_id=%r =>\n%s", message_id, result[:1000])
-    return result
+    parameters = {
+        "max_results": {
+            "type": "integer",
+            "description": f"Maximum number of emails to return (default {GMAIL_DEFAULT_MAX_RESULTS}).",
+        },
+        "query": {
+            "type": "string",
+            "description": "Gmail search query (e.g. 'is:unread', 'from:alice@example.com').",
+        },
+    }
+
+    def execute(
+        self, max_results: int = GMAIL_DEFAULT_MAX_RESULTS, query: str = ""
+    ) -> str:
+        emails = _fetch_emails_raw(max_results, query)
+        if not emails:
+            return "No emails found."
+        output = []
+        for e in emails:
+            output.append(
+                f"ID: {e['id']}\n"
+                f"From: {e['from']}\n"
+                f"Subject: {e['subject']}\n"
+                f"Date: {e['date']}\n"
+                f"Preview: {e['snippet']}"
+            )
+        return "\n\n---\n\n".join(output)
 
 
-def send_email(to: str, subject: str, body: str) -> str:
-    """Send an email via Gmail. Requires recipient address, subject, and body text."""
-    service = get_service("gmail", "v1")
-    msg = MIMEText(body)
-    msg["to"] = to
-    msg["subject"] = subject
-    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-    service.users().messages().send(userId="me", body={"raw": raw}).execute()
-    result = f"Email sent to {to} with subject '{subject}'."
-    logger.debug("[TOOL send_email] to=%r subject=%r => %s", to, subject, result)
-    return result
+class GetEmail(Tool):
+    name = "get_email"
+    description = "Get the full content of a specific email by its message ID."
+    parameters = {
+        "message_id": {
+            "type": "string",
+            "description": "The Gmail message ID from list_emails.",
+        },
+    }
+    required = ["message_id"]
+
+    def execute(self, message_id: str) -> str:
+        service = get_service("gmail", "v1")
+        msg = service.users().messages().get(
+            userId="me", id=message_id, format="full"
+        ).execute()
+        headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
+        body = ""
+        parts = msg["payload"].get("parts", [])
+        if parts:
+            for part in parts:
+                if part["mimeType"] == "text/plain":
+                    data = part["body"].get("data", "")
+                    body = base64.urlsafe_b64decode(data + "==").decode(
+                        "utf-8", errors="replace"
+                    )
+                    break
+        else:
+            data = msg["payload"]["body"].get("data", "")
+            body = base64.urlsafe_b64decode(data + "==").decode(
+                "utf-8", errors="replace"
+            )
+        return (
+            f"From: {headers.get('From', '')}\n"
+            f"Subject: {headers.get('Subject', '')}\n"
+            f"Date: {headers.get('Date', '')}\n\n"
+            f"{body[:GMAIL_MAX_BODY_LENGTH]}"
+        )
+
+
+class SendEmail(Tool):
+    name = "send_email"
+    description = "Send an email via Gmail. Requires recipient address, subject, and body text."
+    parameters = {
+        "to": {
+            "type": "string",
+            "description": "Recipient email address.",
+        },
+        "subject": {
+            "type": "string",
+            "description": "Email subject line.",
+        },
+        "body": {
+            "type": "string",
+            "description": "Email body text.",
+        },
+    }
+    required = ["to", "subject", "body"]
+
+    def execute(self, to: str, subject: str, body: str) -> str:
+        service = get_service("gmail", "v1")
+        msg = MIMEText(body)
+        msg["to"] = to
+        msg["subject"] = subject
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        return f"Email sent to {to} with subject '{subject}'."
+
+
+# ── Register all Gmail tools ────────────────────────────────────────────────
+
+registry.register(ListEmails())
+registry.register(GetEmail())
+registry.register(SendEmail())

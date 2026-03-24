@@ -19,7 +19,7 @@ def command(name: str, description: str):
 def get_command_registry() -> list[tuple[str, str, object]]:
     return list(_registry)
 from config import ALLOWED_CHAT_ID
-from agent import ask_claude, ask_gemini, summarise_history, MAX_HISTORY_TURNS
+from agent import claude_agent, gemini_agent, summarise_history, MAX_HISTORY_TURNS
 from tools import get_events_raw, get_emails_raw
 from interface.ui import (
     format_model_switch, format_error,
@@ -41,11 +41,9 @@ async def _call_agent(user_text: str, context: ContextTypes.DEFAULT_TYPE) -> str
     """Run user_text through the active model, update history, return reply."""
     active_model = context.user_data.get("active_model", "gemini")
     history = context.user_data.get("conversation_history", [])
+    agent = claude_agent if active_model == "claude" else gemini_agent
     try:
-        if active_model == "claude":
-            reply = ask_claude(user_text, history)
-        else:
-            reply = ask_gemini(user_text, history)
+        reply = agent.ask(user_text, history)
     except Exception as e:
         return format_error(str(e))
     reply = sanitize_telegram_html(reply)

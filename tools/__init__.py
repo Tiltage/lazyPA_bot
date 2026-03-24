@@ -1,7 +1,10 @@
-from tools.gmail import list_emails, get_email, send_email, get_emails_raw
-from tools.calendar import list_events, create_event, get_events_raw, delete_event, update_event
+"""Tool package — import modules to trigger registration, then export the registry."""
 
-__all__ = [
-    "list_emails", "get_email", "send_email", "get_emails_raw",
-    "list_events", "create_event", "get_events_raw", "delete_event", "update_event",
-]
+import tools.calendar  # noqa: F401 — registers calendar tools
+import tools.gmail  # noqa: F401 — registers gmail tools
+
+from tools.base import registry
+from tools.calendar import get_events_raw
+from tools.gmail import get_emails_raw
+
+__all__ = ["registry", "get_events_raw", "get_emails_raw"]
