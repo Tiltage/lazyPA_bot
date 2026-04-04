@@ -41,4 +41,7 @@ jobs:
               echo "All requirements satisfied, skipping install."
             fi
 
+            # Clean up logs to prevent disk overload
+            find ~/lazyPA_bot/logs -type f -delete 2>/dev/null || true
+
             sudo systemctl restart lazypa
