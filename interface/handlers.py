@@ -24,6 +24,7 @@ def get_command_registry() -> list[tuple[str, str, object]]:
 
 
 from config import ALLOWED_CHAT_ID, TIMEZONE_NAME
+import conv_logger
 from agent import claude_agent, gemini_agent, summarise_history, MAX_HISTORY_TURNS
 from tools import get_events_raw, get_emails_raw
 from tools.calendar import get_events_for_month, process_month_events
@@ -50,11 +51,19 @@ async def _call_agent(user_text: str, context: ContextTypes.DEFAULT_TYPE) -> str
     active_model = context.user_data.get("active_model", "gemini")
     history = context.user_data.get("conversation_history", [])
     agent = claude_agent if active_model == "claude" else gemini_agent
+
+    conv_logger.ensure_conversation(context.user_data)
+    logger.info("[USER] %s", user_text)
+
     try:
         reply = agent.ask(user_text, history)
     except Exception as e:
+        logger.info("[ERROR] %s", e)
         return format_error(str(e))
     reply = sanitize_telegram_html(reply)
+
+    logger.info("[ASSISTANT] %s", reply)
+
     history.append({"role": "user",     "content": user_text})
     history.append({"role": "assistant", "content": reply})
     if len(history) > MAX_HISTORY_TURNS * 2:
@@ -102,6 +111,7 @@ async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history = context.user_data.get("conversation_history", [])
     turns = len(history)
     context.user_data["conversation_history"] = []
+    context.user_data.pop("conversation_id", None)  # Next message starts a new log file
     await update.message.reply_text(format_clear_confirm(turns))
 
 

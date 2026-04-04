@@ -2,10 +2,13 @@
 
 import calendar as cal_mod
 import datetime
+import json
 import logging
+import urllib.error
+import urllib.request
 from zoneinfo import ZoneInfo
 
-from config import CALENDAR_DEFAULT_DAYS_AHEAD, CALENDAR_MAX_EVENTS, TIMEZONE_NAME
+from config import CALENDAR_DEFAULT_DAYS_AHEAD, CALENDAR_MAX_EVENTS, GOOGLE_PLACES_KEY, TIMEZONE_NAME
 from tools.base import Tool, registry
 from tools.utils import get_service
 
@@ -185,6 +188,38 @@ def process_month_events(events: list[dict], year: int, month: int) -> dict:
     }
 
 
+def _resolve_location(name: str) -> str:
+    """Resolve a location name to a formatted address via the Google Places API.
+
+    Makes a single Text Search request and returns the formattedAddress of the
+    first result. Falls back to the original name on any error or empty result.
+    """
+    if not GOOGLE_PLACES_KEY or not name:
+        return name
+    payload = json.dumps({"textQuery": name}).encode()
+    req = urllib.request.Request(
+        "https://places.googleapis.com/v1/places:searchText",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": GOOGLE_PLACES_KEY,
+            "X-Goog-FieldMask": "places.displayName,places.formattedAddress",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+        places = data.get("places", [])
+        if places:
+            resolved = places[0].get("formattedAddress") or places[0].get("displayName", {}).get("text", name)
+            logger.debug("Places API resolved %r → %r", name, resolved)
+            return resolved
+    except Exception as e:
+        logger.warning("Places API lookup failed for %r: %s", name, e)
+    return name
+
+
 # ── Tool classes ─────────────────────────────────────────────────────────────
 
 
@@ -226,7 +261,9 @@ class CreateEvent(Tool):
     name = "create_event"
     description = f"""\
 Create a Google Calendar event. For recurring events, provide an RRULE string \
-(e.g. 'RRULE:FREQ=WEEKLY;BYDAY=MO'). Omit recurrence for single events."""
+(e.g. 'RRULE:FREQ=WEEKLY;BYDAY=MO'). Omit recurrence for single events. \
+For all-day events, set all_day=True and pass YYYY-MM-DD strings (no time component) \
+for start_datetime and end_datetime."""
     parameters = {
         "summary": {
             "type": "string",
@@ -234,15 +271,32 @@ Create a Google Calendar event. For recurring events, provide an RRULE string \
         },
         "start_datetime": {
             "type": "string",
-            "description": "Start time in ISO 8601 format (e.g. '2025-03-25T14:00:00').",
+            "description": (
+                "For timed events: ISO 8601 datetime (e.g. '2025-03-25T14:00:00'). "
+                "For all-day events: date only (e.g. '2025-03-25')."
+            ),
         },
         "end_datetime": {
             "type": "string",
-            "description": "End time in ISO 8601 format (e.g. '2025-03-25T15:00:00').",
+            "description": (
+                "For timed events: ISO 8601 datetime (e.g. '2025-03-25T15:00:00'). "
+                "For all-day events: date only (e.g. '2025-03-25')."
+            ),
+        },
+        "all_day": {
+            "type": "boolean",
+            "description": (
+                "Set to true for all-day events. When true, start_datetime and "
+                "end_datetime must be YYYY-MM-DD strings with no time component."
+            ),
         },
         "description": {
             "type": "string",
             "description": "Optional event description.",
+        },
+        "location": {
+            "type": "string",
+            "description": "Optional location for the event (e.g. address, room name, or URL).",
         },
         "recurrence": {
             "type": "string",
@@ -256,18 +310,32 @@ Create a Google Calendar event. For recurring events, provide an RRULE string \
         summary: str,
         start_datetime: str,
         end_datetime: str,
+        all_day: bool = False,
         description: str = "",
+        location: str = "",
         recurrence: str = "",
     ) -> str:
         service = get_service("calendar", "v3")
+        if location:
+            location = _resolve_location(location)
         if recurrence and not recurrence.upper().startswith("RRULE:"):
             recurrence = f"RRULE:{recurrence}"
-        event = {
-            "summary": summary,
-            "description": description,
-            "start": {"dateTime": start_datetime, "timeZone": TIMEZONE_NAME},
-            "end": {"dateTime": end_datetime, "timeZone": TIMEZONE_NAME},
-        }
+        if all_day:
+            event = {
+                "summary": summary,
+                "description": description,
+                "start": {"date": start_datetime},
+                "end": {"date": end_datetime},
+            }
+        else:
+            event = {
+                "summary": summary,
+                "description": description,
+                "start": {"dateTime": start_datetime, "timeZone": TIMEZONE_NAME},
+                "end": {"dateTime": end_datetime, "timeZone": TIMEZONE_NAME},
+            }
+        if location:
+            event["location"] = location
         if recurrence:
             event["recurrence"] = [recurrence]
         try:
@@ -339,6 +407,10 @@ recurring series. For non-recurring events, scope is ignored."""
             "type": "string",
             "description": "New event description.",
         },
+        "location": {
+            "type": "string",
+            "description": "New event location (e.g. address, room name, or URL).",
+        },
         "scope": {
             "type": "string",
             "description": "'single' to update one occurrence, 'series' to update the entire recurring series.",
@@ -354,6 +426,7 @@ recurring series. For non-recurring events, scope is ignored."""
         start_datetime: str = None,
         end_datetime: str = None,
         description: str = None,
+        location: str = None,
         scope: str = "single",
     ) -> str:
         service = get_service("calendar", "v3")
@@ -369,6 +442,8 @@ recurring series. For non-recurring events, scope is ignored."""
             patch["summary"] = summary
         if description is not None:
             patch["description"] = description
+        if location is not None:
+            patch["location"] = _resolve_location(location)
         if start_datetime is not None:
             patch["start"] = {"dateTime": start_datetime, "timeZone": TIMEZONE_NAME}
         if end_datetime is not None:

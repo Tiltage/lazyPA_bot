@@ -9,7 +9,8 @@ load_dotenv()
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN")
 ANTHROPIC_KEY    = os.getenv("ANTHROPIC_API_KEY")
 GEMINI_KEY       = os.getenv("GEMINI_API_KEY")
-ALLOWED_CHAT_ID  = int(os.getenv("TELEGRAM_CHAT_ID"))
+ALLOWED_CHAT_ID      = int(os.getenv("TELEGRAM_CHAT_ID"))
+GOOGLE_PLACES_KEY    = os.getenv("GOOGLE_PLACES_API_KEY")
 
 # ── App config (from .config) ─────────────────────────────────────────────────
 
@@ -42,4 +43,5 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/gmail.compose",
     "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/tasks"
 ]

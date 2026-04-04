@@ -2,6 +2,7 @@
 
 import tools.calendar  # noqa: F401 — registers calendar tools
 import tools.gmail  # noqa: F401 — registers gmail tools
+import tools.tasks  # noqa: F401 — registers task tools
 
 from tools.base import registry
 from tools.calendar import get_events_raw, get_events_for_month, process_month_events

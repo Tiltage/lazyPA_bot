@@ -20,7 +20,7 @@ jobs:
             git pull
 
             # Write .env from secrets
-            cat > ~/.env << EOF
+            cat > ~/lazyPA_bot/.env << EOF
             TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
             ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
             GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
